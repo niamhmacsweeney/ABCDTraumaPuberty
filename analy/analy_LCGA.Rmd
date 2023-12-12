@@ -1,0 +1,403 @@
+---
+title: "analy_LCGA"
+author: "Niamh MacSweeney"
+date: "2023-05-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## Introduction
+
+This script will be used to run latent class growth analysis to examine changes in pubertal development over time and generate classes to use in our later analysis. See our pre-registered protocol for full details of our analysis plan: https://osf.io/txsvh (uploaded to OSF on 23.05.23)
+
+```{r setup}
+
+#load libraries
+library(tidyverse) # includes ggplot2
+library(ggtext)     # for extra text options
+library(ggdist)     # for extra geoms
+library(patchwork)  # for composing multiple plots
+library(lcmm)
+library(lavaan)
+library(hrbrthemes) #for plotting
+library(stats)
+library(lme4)
+library(knitr) #for tables
+library(pander) #for tables
+library(tableHTML)
+
+#extra packages for plotting 
+library(nord)
+library(scico)
+library(wesanderson)
+library(taylor)
+library(viridis)
+library(ggtext)     # for extra text options
+library(ggdist)     # for extra geoms
+library(patchwork)  #  composing multiple plots
+
+
+
+#set working directory
+#setwd("../ABCDTraumaPuberty/analy")
+
+```
+
+## Load in cleaned data from prep_descriptives.Rmd script 
+
+```{r load data}
+
+data <- readRDS("../data/cleanData5.0.rds")
+
+#check variable type
+str(data)
+#change subject to factor and then to numeric 
+data$id <- as.factor(data$src_subject_id) %>% 
+            as.numeric()
+
+data$time <- as.factor(data$time) %>% 
+  as.numeric()
+
+str(data)
+
+```
+
+
+```{r inspect data distribution}
+
+summary_data <- aggregate(pds_avg ~ time, data = data, FUN = mean) #mean outcome for each timepoint
+
+summary_plot <- ggplot(data = summary_data, aes(x = time, y = pds_avg)) +
+  geom_bar(stat = "identity") +
+  theme_classic()
+summary_plot
+
+#inspect data available per follow up timepoint
+sampleSizes <- data %>% 
+  select(src_subject_id, time, pds_avg) %>% 
+  group_by(time) %>% 
+  count()
+sampleSizes
+
+
+```
+
+```{r reduce df to 4 follow-up timepoints}
+
+#We can do this by filtering df for when time is not equal to T5 because the puberty data are the only data with this follow-up data available, that is relevant. 
+
+data <- data %>% 
+  filter(time != 5) #19453 observations
+
+```
+
+
+Keep unrelated individuals only for ease of modelling later 
+
+```{r unrelated sample}
+
+#N observations = 16856
+
+data <- data[data$src_subject_id %in% c(data[!duplicated(data$rel_family_id),"src_subject_id"]),] #keep one member from each family but keep all observations for that family member as the data is in long format. 
+n_distinct(data$rel_family_id) #4255
+n_distinct(data$src_subject_id) #4255
+
+```
+##Centre age
+To start, we will centre age on the mean age at wave 1. This won't affect the model fit but it will make the intercepts (and the differences between intercepts) easier to interpret. 
+
+```{r centre age}
+
+#get mean age of wave 1
+wave1Data <- data %>% 
+  filter(time == 1) 
+
+meanAgeWave1 <- mean(wave1Data$age_years) #mean age = 9.88
+
+#adjust age by subtracting mean age at Wave 1 from age_years
+data$age_centred <- data$age_years - meanAgeWave1
+head(data$age_centred) #looks okay
+
+
+```
+
+##LCGA 
+###Run classes (1-6)
+
+#See R lccm notes for further details: https://cran.r-project.org/web/packages/lcmm/lcmm.pdf
+
+Notes on model summary output: 
+
+The fixed effects in the class-membership model explain the likelihood of individuals belonging to specific latent classes, while the fixed effects in the longitudinal model explain the within-class variation in the outcome variable over time.
+
+
+
+```{r LGCA}
+# run models with 1-6 classes, each with 100 random starts
+# using the 1-class model to set initial start values: 
+
+set.seed(2507)
+
+lcga1 <- hlme(pds_avg ~ age_centred, subject = "id", ng = 1, data = data) 
+
+lcga2 <- gridsearch(rep = 100, maxiter = 10, minit = lcga1, m=hlme(pds_avg ~ age_centred, subject = "id", ng = 2, data = data, mixture = ~ age_centred)) 
+
+lcga3 <- gridsearch(rep = 100, maxiter = 10, minit = lcga1, m=hlme(pds_avg ~ age_centred, subject = "id", ng = 3, data = data, mixture = ~ age_centred)) 
+
+lcga4 <- gridsearch(rep = 100, maxiter = 10, minit = lcga1, m=hlme(pds_avg ~ age_centred, subject = "id", ng = 4, data = data, mixture = ~ age_centred)) 
+
+lcga5 <- gridsearch(rep = 100, maxiter = 10, minit = lcga1, m=hlme(pds_avg ~ age_centred, subject = "id", ng = 5, data = data, mixture = ~ age_centred)) 
+
+lcga6 <- gridsearch(rep = 100, maxiter = 10, minit = lcga1, m=hlme(pds_avg ~ age_centred, subject = "id", ng = 6, data = data, mixture = ~ age_centred)) 
+
+
+```
+### Compare class models 
+
+
+See this paper for information on a reporting checklist for LCGA results: https://www.tandfonline.com/doi/full/10.1080/10705511.2016.1247646
+
+The documentation for the lcmm package is also helpful, especially the info for summarytable and summaryplot function. 
+
+From these graphs and statistics, it looks like a 3 or 4 class solution is the best fitting model across the different model fit indices. 
+
+```{r compare models}
+
+# make table with results for the 4 models: 
+LCGAresults <- summarytable(lcga1, lcga2, lcga3, lcga4,lcga5, lcga6,
+        which=c("G", "conv", "loglik","npm","BIC", "AIC", "SABIC", "ICL", "entropy",  "%class"), display=TRUE)
+
+#convert to df so that we can round to 3 decimal places
+LCGAresults <- as.data.frame(LCGAresults)
+LCGAresults <- LCGAresults %>%
+  mutate_if(is.numeric, list(~round(., 2)))
+
+htmlTable <- htmlTable::htmlTable(LCGAresults)
+htmlTable
+
+#save Class summary table 
+#saveRDS(LCGAresults, "/../data/LCGASummaryTable.rds")
+
+#plot a summary of the results 
+summaryplot(lcga1, lcga2, lcga3, lcga4,
+        which=c("loglik","npm","BIC", "AIC", "SABIC", "ICL", "entropy"), mfrow=c(1,length(which)), xaxis="G" )
+
+#let's look at 3 class model more closely 
+summary(lcga3)
+summary(lcga4)
+
+```
+
+#GMM 
+Growth mixed modelling - with both a random intercept and slope (GMM-2)
+
+This allows for individual-level variation in baseline PDS scores and growth rate over time
+
+The ‘nwg=T’ statement indicates that we want to allow the variances of the random intercepts to vary across classes.
+
+We will run it without site_id_l and then run a sensitivity analysis with site_id_l. We will also run the models with age as the longitudinal measure of ageing instead of time. We need to centre the age variable to make the intercepts easier to interpret.
+
+Load gmm outputs generated from running this script originally (for reproducing tables etc. for manuscript write up)
+```{r load gmm from earlier analysis}
+
+
+gmm3_age <- readRDS("../data/gmm3_age5.0.rds")
+
+gmm4_age <- readRDS("../data/gmm4_age5.0.rds")
+
+
+```
+
+Run GMM
+```{r GMM}
+set.seed(2507)
+
+gmm1_age <- hlme(pds_avg ~ age_centred, subject = "id", random=~1 + age_centred, ng = 1, data = data) 
+
+gmm3_age <- gridsearch(rep = 100, maxiter = 10, minit = gmm1_age, hlme(pds_avg ~ age_centred, subject = "id", random=~1 + age_centred, ng = 3, data = data, mixture = ~ age_centred, nwg=T)) 
+
+gmm4_age <- gridsearch(rep = 100, maxiter = 10, minit = gmm1_age, hlme(pds_avg ~ age_centred, subject = "id", random=~1 + age_centred, ng = 4, data = data, mixture = ~ age_centred, nwg=T)) 
+
+```
+
+
+```{r GMM results}
+# make table with results:
+
+classSummTbl <- summarytable(gmm3_age, gmm4_age,
+        which=c("G", "conv", "loglik","npm","BIC", "AIC", "SABIC", "ICL", "entropy",  "%class"), display=TRUE )
+as.data.frame(classSummTbl)
+
+#convert to df so that we can round to 3 decimal places
+classSummTbl <- as.data.frame(classSummTbl)
+classSummTbl <- classSummTbl %>%
+  mutate_if(is.numeric, list(~round(., 2)))
+classSummTbl
+
+htmlTable <- htmlTable::htmlTable(classSummTbl)
+View(htmlTable)
+
+
+#save GMM Class summary table 
+saveRDS(classSummTbl, "../data/GMMSummaryTable.rds")
+
+
+# summaryplot(gmm1_age ,gmm2_age ,gmm3_age, gmm4_age, gmm5_age, gmm6_age,
+#         which=c("loglik","npm","BIC", "AIC", "SABIC", "ICL", "entropy"), mfrow=c(1,length(which)), xaxis="G" )
+
+
+```
+
+Save GMM outputs
+```{r, save or load gmm outputs for future work}
+
+# saveRDS(gmm1_age, "/Users/niamhmacsweeney/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Edinburgh/ABCD_collabs/ABCD_trauma_puberty_dep/data/gmm1_age5.0.rds")
+
+# saveRDS(gmm3_age, "/Users/niamhmacsweeney/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Edinburgh/ABCD_collabs/ABCD_trauma_puberty_dep/data/gmm3_age5.0.rds")
+# # 
+# saveRDS(gmm4_age, "/Users/niamhmacsweeney/Library/CloudStorage/OneDrive-UniversityofEdinburgh/Edinburgh/ABCD_collabs/ABCD_trauma_puberty_dep/data/gmm4_age5.0.rds")
+
+
+```
+
+
+###Inspect models
+#### 3 class
+
+Let's look at this class solution more closely. 
+We need to determine whether there are significant differences in the intercept and slopes of the classes before we do further modelling. 
+
+```{r inspect 3 solution, echo=FALSE}
+summary(gmm3_age)
+# N unique IDs = 4225
+# N observations = 15457 
+
+data2 = data[complete.cases(data$pds_avg), ] #ids used in gmm, N = 5457  observations. 
+length(unique(data2$src_subject_id)) #get counts
+length(unique(data2$id)) #get counts 
+
+data3Class = gmm3_age$predRE #gives dataframe with intercept and slope
+#rename variable "age_centred" to slope from the predRE outcome to avoid confusion
+data3Class <- rename(data3Class, slope = age_centred)
+finalData3Class = merge(data2, data3Class, by = "id")
+
+# Extract the latent class membership probabilities for each participant
+ClassAssignments3 <- data.frame(gmm3_age$pprob$class, gmm3_age$pprob$id) 
+ClassAssignments3 <- ClassAssignments3 %>% 
+  rename(class = gmm3_age.pprob.class,
+         id = gmm3_age.pprob.id)
+
+cleanData3Class <- merge(finalData3Class, ClassAssignments3, by = "id") #make new df with class assignments and id for 3 class solution
+
+#change class names so that they are descriptive
+#change to factor first
+cleanData3Class$class <- as.factor(cleanData3Class$class)
+cleanData3Class <- cleanData3Class %>% 
+    mutate(class_label = case_when(class == "1" ~ "Slow developers",
+                                   class =="2" ~ "Typical developers",
+                                   class =="3" ~ "Early starters"))
+
+ageValues <- data.frame(age_centred = c(9-meanAgeWave1, 14-meanAgeWave1)) #make age centred values for first and last time point for plotting purposes
+
+predVals <- predictY(gmm3_age, ageValues, var.time =  "age_centred", draws = TRUE)
+predVals$pred
+
+predValsLong <- pivot_longer(as.data.frame(predVals$pred), cols = Ypred_class1:upper.Ypred_class3, values_to = "value", names_to = "argument")
+
+predValsLong$age_years = c(rep(9,9), rep(14,9))
+
+#let's change the class value names 
+predValsLong <- predValsLong %>%
+  dplyr::mutate(class_label = case_when(
+    class == "Ypred_class1" ~ "Slow developers",
+    class == "Ypred_class2" ~ "Typical developers",
+    class == "Ypred_class3" ~ "Early starters",
+    TRUE ~ class
+  ))
+
+
+
+#####make dataframe manually for plotting purposes 
+
+plotDF <- data.frame(
+  class = c("Slow developers", "Typical developers", "Early starters", "Slow developers", "Typical developers", "Early starters"),
+  age = c(9, 9, 9, 14, 14, 14),
+  pred_vals = c(1.201887, 1.269237, 2.327406, 2.122767, 3.552821, 3.493821),
+  ci_lower = c(1.161498, 1.221298, 2.199003, 2.060464, 3.522345, 3.398855),
+  ci_upper = c(1.242276, 1.317175, 2.455808, 2.185070, 3.583298, 3.588788)
+)
+
+```
+
+
+```{r make 3 class plot }
+
+plot3ClassCI <- ggplot(plotDF, aes(age, pred_vals)) +
+  geom_line(aes(colour = as.factor(class),
+                group = class),
+            alpha = 1, linewidth = 1.5, key_glyph = "point", show.legend = TRUE) + 
+  geom_ribbon(aes(ymin = ci_lower, ymax = ci_upper, fill = as.factor(class), group = class), alpha = 0.2, show.legend = FALSE) +
+  labs(
+    title = "Pubertal maturation trajectories from ages 9 to 14 years",
+    x = "Age (years)",
+    y = "PDS average score") +
+  scale_color_manual(values = c("#00b9e3", "#ae87ff", "#d39200"),
+    limits = c("Early starters", "Typical developers", "Slow developers")) + 
+  scale_fill_manual(values = c("#00b9e3", "#ae87ff", "#d39200"),
+    limits = c("Early starters", "Typical developers", "Slow developers")) + 
+  scale_y_continuous(breaks = seq(0, max(plotDF$pred_vals), by = 0.5)) +
+  theme_classic() +
+  theme(legend.title = element_blank()) +
+  theme(legend.text = element_text(size = 16)) +
+  theme(axis.text.x = element_text(size = 14, hjust = 1)) +
+  theme(axis.text.y = element_text(size = 14, hjust = 1)) +
+  theme(axis.title = element_text(size = 16, hjust = 0.5)) +
+  theme(plot.title = element_text(size = 24, face = "bold", hjust = 0.5)) +
+  guides(color = guide_legend(override.aes = list(size = 6)))
+
+plot3ClassCI
+
+
+ggsave("../figs/plot3ClassCI.png", plot3ClassCI, width = 12, height = 8, units = "in", dpi = 300)
+
+
+```
+
+
+```{r 3 class solution intercept and slopes}
+
+#Class 1: Intercept = 1.36463 ; slope = 0.18418
+#Class 2: Intercept = 1.67281; slope = 0.45672
+#Class 3: Intercept = 2.53355; slope = 0.23328 
+
+intercept <- c(1.36463, 1.67281, 2.53355)
+slope <- c(0.18418, 0.45672, 0.23328)
+class <- c(1:3)
+percentage <- c(14.63, 76.4, 8.97)
+
+class3Tbl <- data.frame(Class = class, Intercept = intercept, Slope = slope, Percentage  = percentage)
+class3Tbl
+
+htmlTable <- htmlTable::htmlTable(class3Tbl)
+View(class3Tbl)
+
+
+```
+
+####Export clean df
+
+We want to make a new dataframe with class membership details for each participant. We will use this dataframe as the input for the analysis in script, analy_main.Rmd
+
+```{r, export clean df}
+
+#save dataframe with 3 class membership details for each participant 
+
+saveRDS(cleanData3Class, "../data/cleanData3Class5.0.rds")
+
+
+```
+
+
